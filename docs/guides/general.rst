@@ -8,6 +8,7 @@ General
   general/container-building
   general/native-encryption
   general/uefi-booting
+  general/migration
   general/remote-access
   general/portable
 
