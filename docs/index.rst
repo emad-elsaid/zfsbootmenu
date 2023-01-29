@@ -27,6 +27,7 @@
   :hidden:
 
   CHANGELOG
+  faq 
 
 .. toctree::
   :caption: Manual Pages
