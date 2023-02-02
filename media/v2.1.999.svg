@@ -1,0 +1,1736 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1600" height="326" onload="init(evt)" viewBox="0 0 1600 326" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				clearzoom();
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1600.0" height="326.0" fill="url(#background)"  />
+<text id="title" x="800.00" y="24" >environments/test.void: loglevel=7 zbm.show rd.log=kmsg console=tty1 console=ttyS0,115200n8 zbm.lines=77 zbm.columns=284</text>
+<text id="details" x="10.00" y="309" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1490.00" y="24" >Search</text>
+<text id="ignorecase" x="1574.00" y="24" >ic</text>
+<text id="matched" x="1490.00" y="309" > </text>
+<g id="frames">
+<g >
+<title>be_is_locked@/lib/zfsbootmenu-core.sh (142,481 microseconds, 1.78%)</title><rect x="449.6" y="133" width="28.2" height="31.0" fill="rgb(247,177,21)" rx="2" ry="2" />
+<text  x="452.61" y="151.5" >b..</text>
+</g>
+<g >
+<title>zinfo@/lib/kmsg-log-lib.sh (2,486 microseconds, 0.03%)</title><rect x="56.8" y="165" width="0.5" height="31.0" fill="rgb(205,181,42)" rx="2" ry="2" />
+<text  x="59.85" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (28,482 microseconds, 0.36%)</title><rect x="215.9" y="133" width="5.6" height="31.0" fill="rgb(228,93,38)" rx="2" ry="2" />
+<text  x="218.88" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (36,933 microseconds, 0.46%)</title><rect x="250.5" y="69" width="7.3" height="31.0" fill="rgb(219,212,40)" rx="2" ry="2" />
+<text  x="253.48" y="87.5" ></text>
+</g>
+<g >
+<title>csv_cat@/lib/zfsbootmenu-lib.sh (17,572 microseconds, 0.22%)</title><rect x="1373.8" y="165" width="3.5" height="31.0" fill="rgb(224,93,14)" rx="2" ry="2" />
+<text  x="1376.84" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (44,859 microseconds, 0.56%)</title><rect x="276.6" y="69" width="8.9" height="31.0" fill="rgb(207,104,52)" rx="2" ry="2" />
+<text  x="279.64" y="87.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,508 microseconds, 0.22%)</title><rect x="1210.5" y="165" width="3.4" height="31.0" fill="rgb(250,185,5)" rx="2" ry="2" />
+<text  x="1213.45" y="183.5" ></text>
+</g>
+<g >
+<title>select_kernel@/lib/zfsbootmenu-core.sh (136,563 microseconds, 1.71%)</title><rect x="401.7" y="133" width="27.0" height="31.0" fill="rgb(241,156,48)" rx="2" ry="2" />
+<text  x="404.67" y="151.5" >s..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (21,131 microseconds, 0.26%)</title><rect x="1115.0" y="197" width="4.2" height="31.0" fill="rgb(220,167,38)" rx="2" ry="2" />
+<text  x="1117.97" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (16,424 microseconds, 0.21%)</title><rect x="882.2" y="165" width="3.2" height="31.0" fill="rgb(244,125,9)" rx="2" ry="2" />
+<text  x="885.19" y="183.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (8,156 microseconds, 0.10%)</title><rect x="42.2" y="165" width="1.6" height="31.0" fill="rgb(226,146,25)" rx="2" ry="2" />
+<text  x="45.19" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (36,828 microseconds, 0.46%)</title><rect x="519.4" y="69" width="7.3" height="31.0" fill="rgb(233,189,20)" rx="2" ry="2" />
+<text  x="522.39" y="87.5" ></text>
+</g>
+<g >
+<title>csv_cat@/lib/zfsbootmenu-lib.sh (22,257 microseconds, 0.28%)</title><rect x="1564.0" y="165" width="4.4" height="31.0" fill="rgb(241,185,22)" rx="2" ry="2" />
+<text  x="1567.04" y="183.5" ></text>
+</g>
+<g >
+<title>zinfo@/lib/kmsg-log-lib.sh (2,545 microseconds, 0.03%)</title><rect x="47.8" y="165" width="0.5" height="31.0" fill="rgb(214,84,38)" rx="2" ry="2" />
+<text  x="50.84" y="183.5" ></text>
+</g>
+<g >
+<title>select_kernel@/lib/zfsbootmenu-core.sh (102,439 microseconds, 1.28%)</title><rect x="844.1" y="197" width="20.3" height="31.0" fill="rgb(212,58,31)" rx="2" ry="2" />
+<text  x="847.09" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (35,871 microseconds, 0.45%)</title><rect x="241.7" y="101" width="7.1" height="31.0" fill="rgb(254,192,7)" rx="2" ry="2" />
+<text  x="244.74" y="119.5" ></text>
+</g>
+<g >
+<title>kcl_suppress@/lib/zfsbootmenu-kcl.sh (42,706 microseconds, 0.53%)</title><rect x="815.6" y="165" width="8.4" height="31.0" fill="rgb(222,69,26)" rx="2" ry="2" />
+<text  x="818.59" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-core.sh (3,447 microseconds, 0.04%)</title><rect x="1156.7" y="197" width="0.6" height="31.0" fill="rgb(248,165,48)" rx="2" ry="2" />
+<text  x="1159.66" y="215.5" ></text>
+</g>
+<g >
+<title>draw_be@/lib/zfsbootmenu-lib.sh (1,016,823 microseconds, 12.74%)</title><rect x="905.3" y="197" width="201.2" height="31.0" fill="rgb(245,165,36)" rx="2" ry="2" />
+<text  x="908.29" y="215.5" >draw_be@/lib/zfsbootmenu-l..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (15,879 microseconds, 0.20%)</title><rect x="1377.8" y="165" width="3.2" height="31.0" fill="rgb(240,165,8)" rx="2" ry="2" />
+<text  x="1380.85" y="183.5" ></text>
+</g>
+<g >
+<title>be_has_encroot@/lib/zfsbootmenu-core.sh (58,554 microseconds, 0.73%)</title><rect x="650.9" y="197" width="11.6" height="31.0" fill="rgb(210,63,43)" rx="2" ry="2" />
+<text  x="653.87" y="215.5" ></text>
+</g>
+<g >
+<title>validate_cmdline_cache@/lib/zfsbootmenu-core.sh (5,231 microseconds, 0.07%)</title><rect x="897.1" y="165" width="1.1" height="31.0" fill="rgb(243,110,36)" rx="2" ry="2" />
+<text  x="900.14" y="183.5" ></text>
+</g>
+<g >
+<title>kcl_assemble@/lib/zfsbootmenu-kcl.sh (1,582 microseconds, 0.02%)</title><rect x="902.0" y="165" width="0.3" height="31.0" fill="rgb(218,58,23)" rx="2" ry="2" />
+<text  x="904.95" y="183.5" ></text>
+</g>
+<g >
+<title>main@/bin/zfsbootmenu (107,267 microseconds, 1.34%)</title><rect x="1568.8" y="229" width="21.2" height="31.0" fill="rgb(217,6,33)" rx="2" ry="2" />
+<text  x="1571.77" y="247.5" ></text>
+</g>
+<g >
+<title>center_string@/lib/zfsbootmenu-core.sh (1,324 microseconds, 0.02%)</title><rect x="831.5" y="197" width="0.3" height="31.0" fill="rgb(219,119,29)" rx="2" ry="2" />
+<text  x="834.52" y="215.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-core.sh (3,514 microseconds, 0.04%)</title><rect x="198.0" y="197" width="0.7" height="31.0" fill="rgb(238,127,1)" rx="2" ry="2" />
+<text  x="201.04" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (28,630 microseconds, 0.36%)</title><rect x="638.1" y="133" width="5.7" height="31.0" fill="rgb(245,155,6)" rx="2" ry="2" />
+<text  x="641.12" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (28,622 microseconds, 0.36%)</title><rect x="779.7" y="133" width="5.7" height="31.0" fill="rgb(245,192,28)" rx="2" ry="2" />
+<text  x="782.72" y="151.5" ></text>
+</g>
+<g >
+<title>is_snapshot@/lib/zfsbootmenu-core.sh (6,853 microseconds, 0.09%)</title><rect x="529.4" y="101" width="1.4" height="31.0" fill="rgb(219,226,25)" rx="2" ry="2" />
+<text  x="532.43" y="119.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (39,376 microseconds, 0.49%)</title><rect x="587.1" y="69" width="7.8" height="31.0" fill="rgb(249,144,29)" rx="2" ry="2" />
+<text  x="590.11" y="87.5" ></text>
+</g>
+<g >
+<title>get_zbm_bool@/lib/zfsbootmenu-kcl.sh (17,689 microseconds, 0.22%)</title><rect x="44.0" y="165" width="3.5" height="31.0" fill="rgb(227,92,41)" rx="2" ry="2" />
+<text  x="47.00" y="183.5" ></text>
+</g>
+<g >
+<title>get_zbm_bool@/lib/zfsbootmenu-kcl.sh (14,972 microseconds, 0.19%)</title><rect x="59.4" y="165" width="3.0" height="31.0" fill="rgb(244,5,12)" rx="2" ry="2" />
+<text  x="62.42" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,411 microseconds, 0.22%)</title><rect x="1425.8" y="165" width="3.4" height="31.0" fill="rgb(236,73,16)" rx="2" ry="2" />
+<text  x="1428.80" y="183.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (6,366 microseconds, 0.08%)</title><rect x="35.9" y="165" width="1.2" height="31.0" fill="rgb(241,209,42)" rx="2" ry="2" />
+<text  x="38.86" y="183.5" ></text>
+</g>
+<g >
+<title>validate_cmdline_cache@/lib/zfsbootmenu-core.sh (4,379 microseconds, 0.05%)</title><rect x="683.5" y="165" width="0.9" height="31.0" fill="rgb(252,63,47)" rx="2" ry="2" />
+<text  x="686.49" y="183.5" ></text>
+</g>
+<g >
+<title>colorize@/lib/zfsbootmenu-core.sh (5,504 microseconds, 0.07%)</title><rect x="731.9" y="197" width="1.1" height="31.0" fill="rgb(232,162,17)" rx="2" ry="2" />
+<text  x="734.91" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (30,830 microseconds, 0.39%)</title><rect x="549.5" y="101" width="6.1" height="31.0" fill="rgb(241,44,32)" rx="2" ry="2" />
+<text  x="552.53" y="119.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (30,931 microseconds, 0.39%)</title><rect x="743.4" y="165" width="6.1" height="31.0" fill="rgb(238,104,24)" rx="2" ry="2" />
+<text  x="746.38" y="183.5" ></text>
+</g>
+<g >
+<title>draw_kernel@/lib/zfsbootmenu-lib.sh (90,857 microseconds, 1.14%)</title><rect x="1386.6" y="197" width="17.9" height="31.0" fill="rgb(231,120,3)" rx="2" ry="2" />
+<text  x="1389.56" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (46,329 microseconds, 0.58%)</title><rect x="507.6" y="37" width="9.2" height="31.0" fill="rgb(231,147,22)" rx="2" ry="2" />
+<text  x="510.64" y="55.5" ></text>
+</g>
+<g >
+<title>is_snapshot@/lib/zfsbootmenu-core.sh (8,549 microseconds, 0.11%)</title><rect x="321.4" y="101" width="1.7" height="31.0" fill="rgb(214,3,48)" rx="2" ry="2" />
+<text  x="324.41" y="119.5" ></text>
+</g>
+<g >
+<title>read_kcl_prop@/lib/zfsbootmenu-kcl.sh (35,409 microseconds, 0.44%)</title><rect x="789.0" y="165" width="7.0" height="31.0" fill="rgb(248,127,6)" rx="2" ry="2" />
+<text  x="791.97" y="183.5" ></text>
+</g>
+<g >
+<title>_build_zbm_kcl@/lib/zfsbootmenu-kcl.sh (12,296 microseconds, 0.15%)</title><rect x="16.0" y="101" width="2.5" height="31.0" fill="rgb(250,93,11)" rx="2" ry="2" />
+<text  x="19.02" y="119.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (46,228 microseconds, 0.58%)</title><rect x="518.3" y="101" width="9.2" height="31.0" fill="rgb(208,12,8)" rx="2" ry="2" />
+<text  x="521.30" y="119.5" ></text>
+</g>
+<g >
+<title>source@/etc/zfsbootmenu.conf (13,355 microseconds, 0.17%)</title><rect x="733.5" y="197" width="2.6" height="31.0" fill="rgb(248,123,22)" rx="2" ry="2" />
+<text  x="736.46" y="215.5" ></text>
+</g>
+<g >
+<title>center_string@/lib/zfsbootmenu-core.sh (1,341 microseconds, 0.02%)</title><rect x="1466.0" y="197" width="0.2" height="31.0" fill="rgb(247,20,40)" rx="2" ry="2" />
+<text  x="1468.98" y="215.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-kcl.sh (1,491 microseconds, 0.02%)</title><rect x="1157.0" y="165" width="0.3" height="31.0" fill="rgb(225,204,21)" rx="2" ry="2" />
+<text  x="1160.05" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/kmsg-log-lib.sh (3,523 microseconds, 0.04%)</title><rect x="11.7" y="165" width="0.7" height="31.0" fill="rgb(208,158,18)" rx="2" ry="2" />
+<text  x="14.69" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,280 microseconds, 0.22%)</title><rect x="1444.3" y="165" width="3.4" height="31.0" fill="rgb(252,212,0)" rx="2" ry="2" />
+<text  x="1447.28" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (29,274 microseconds, 0.37%)</title><rect x="450.6" y="101" width="5.8" height="31.0" fill="rgb(248,116,7)" rx="2" ry="2" />
+<text  x="453.56" y="119.5" ></text>
+</g>
+<g >
+<title>import_pool@/lib/zfsbootmenu-core.sh (307,010 microseconds, 3.85%)</title><rect x="88.1" y="197" width="60.8" height="31.0" fill="rgb(224,149,52)" rx="2" ry="2" />
+<text  x="91.10" y="215.5" >import..</text>
+</g>
+<g >
+<title>source@/etc/zfsbootmenu.conf (25,833 microseconds, 0.32%)</title><rect x="1405.5" y="197" width="5.1" height="31.0" fill="rgb(215,62,15)" rx="2" ry="2" />
+<text  x="1408.46" y="215.5" ></text>
+</g>
+<g >
+<title>global_header@/lib/zfsbootmenu-lib.sh (6,317 microseconds, 0.08%)</title><rect x="1150.3" y="165" width="1.2" height="31.0" fill="rgb(250,33,51)" rx="2" ry="2" />
+<text  x="1153.26" y="183.5" ></text>
+</g>
+<g >
+<title>draw_be@/lib/zfsbootmenu-lib.sh (35,397 microseconds, 0.44%)</title><rect x="1106.8" y="197" width="7.1" height="31.0" fill="rgb(228,223,29)" rx="2" ry="2" />
+<text  x="1109.85" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (16,963 microseconds, 0.21%)</title><rect x="739.7" y="165" width="3.4" height="31.0" fill="rgb(226,139,28)" rx="2" ry="2" />
+<text  x="742.70" y="183.5" ></text>
+</g>
+<g >
+<title>get_spl_hostid@/lib/zfsbootmenu-core.sh (38,453 microseconds, 0.48%)</title><rect x="696.2" y="165" width="7.6" height="31.0" fill="rgb(254,62,0)" rx="2" ry="2" />
+<text  x="699.21" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (22,979 microseconds, 0.29%)</title><rect x="357.7" y="133" width="4.5" height="31.0" fill="rgb(244,189,37)" rx="2" ry="2" />
+<text  x="360.68" y="151.5" ></text>
+</g>
+<g >
+<title>center_string@/lib/zfsbootmenu-core.sh (1,808 microseconds, 0.02%)</title><rect x="1215.7" y="197" width="0.4" height="31.0" fill="rgb(218,22,49)" rx="2" ry="2" />
+<text  x="1218.72" y="215.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-lib.sh (3,550 microseconds, 0.04%)</title><rect x="199.5" y="197" width="0.7" height="31.0" fill="rgb(211,83,54)" rx="2" ry="2" />
+<text  x="202.47" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,005 microseconds, 0.21%)</title><rect x="1183.2" y="165" width="3.4" height="31.0" fill="rgb(216,201,24)" rx="2" ry="2" />
+<text  x="1186.24" y="183.5" ></text>
+</g>
+<g >
+<title>colorize@/lib/zfsbootmenu-core.sh (5,532 microseconds, 0.07%)</title><rect x="1466.7" y="197" width="1.0" height="31.0" fill="rgb(248,9,13)" rx="2" ry="2" />
+<text  x="1469.65" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (27,644 microseconds, 0.35%)</title><rect x="1128.8" y="133" width="5.5" height="31.0" fill="rgb(237,67,47)" rx="2" ry="2" />
+<text  x="1131.83" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,242 microseconds, 0.22%)</title><rect x="88.9" y="165" width="3.4" height="31.0" fill="rgb(242,185,11)" rx="2" ry="2" />
+<text  x="91.92" y="183.5" ></text>
+</g>
+<g >
+<title>all (7,983,660 microseconds, 100%)</title><rect x="10.0" y="261" width="1580.0" height="31.0" fill="rgb(229,103,32)" rx="2" ry="2" />
+<text  x="13.00" y="279.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,852 microseconds, 0.30%)</title><rect x="563.6" y="133" width="4.7" height="31.0" fill="rgb(216,159,43)" rx="2" ry="2" />
+<text  x="566.60" y="151.5" ></text>
+</g>
+<g >
+<title>main@/bin/zfsbootmenu (233,143 microseconds, 2.92%)</title><rect x="1106.8" y="229" width="46.2" height="31.0" fill="rgb(211,150,12)" rx="2" ry="2" />
+<text  x="1109.85" y="247.5" >main..</text>
+</g>
+<g >
+<title>center_string@/lib/zfsbootmenu-core.sh (1,885 microseconds, 0.02%)</title><rect x="830.8" y="197" width="0.3" height="31.0" fill="rgb(224,197,20)" rx="2" ry="2" />
+<text  x="833.77" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (30,980 microseconds, 0.39%)</title><rect x="531.0" y="101" width="6.2" height="31.0" fill="rgb(240,162,48)" rx="2" ry="2" />
+<text  x="534.03" y="119.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (37,408 microseconds, 0.47%)</title><rect x="227.3" y="165" width="7.4" height="31.0" fill="rgb(212,186,37)" rx="2" ry="2" />
+<text  x="230.25" y="183.5" ></text>
+</g>
+<g >
+<title>column_wrap@/lib/zfsbootmenu-lib.sh (21,134 microseconds, 0.26%)</title><rect x="1135.0" y="165" width="4.2" height="31.0" fill="rgb(253,138,38)" rx="2" ry="2" />
+<text  x="1137.98" y="183.5" ></text>
+</g>
+<g >
+<title>load_be_cmdline@/lib/zfsbootmenu-core.sh (82,296 microseconds, 1.03%)</title><rect x="886.4" y="197" width="16.2" height="31.0" fill="rgb(242,78,21)" rx="2" ry="2" />
+<text  x="889.36" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,406 microseconds, 0.29%)</title><rect x="1454.1" y="133" width="4.6" height="31.0" fill="rgb(207,178,33)" rx="2" ry="2" />
+<text  x="1457.06" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,498 microseconds, 0.22%)</title><rect x="810.6" y="165" width="3.4" height="31.0" fill="rgb(233,24,2)" rx="2" ry="2" />
+<text  x="813.58" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (22,673 microseconds, 0.28%)</title><rect x="437.3" y="133" width="4.5" height="31.0" fill="rgb(249,58,10)" rx="2" ry="2" />
+<text  x="440.35" y="151.5" ></text>
+</g>
+<g >
+<title>draw_snapshots@/lib/zfsbootmenu-lib.sh (18,505 microseconds, 0.23%)</title><rect x="1377.5" y="197" width="3.6" height="31.0" fill="rgb(210,24,29)" rx="2" ry="2" />
+<text  x="1380.48" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (21,631 microseconds, 0.27%)</title><rect x="871.7" y="165" width="4.3" height="31.0" fill="rgb(246,102,22)" rx="2" ry="2" />
+<text  x="874.69" y="183.5" ></text>
+</g>
+<g >
+<title>select_kernel@/lib/zfsbootmenu-core.sh (89,492 microseconds, 1.12%)</title><rect x="632.5" y="197" width="17.7" height="31.0" fill="rgb(229,73,6)" rx="2" ry="2" />
+<text  x="635.50" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (41,154 microseconds, 0.52%)</title><rect x="468.7" y="69" width="8.2" height="31.0" fill="rgb(249,189,28)" rx="2" ry="2" />
+<text  x="471.74" y="87.5" ></text>
+</g>
+<g >
+<title>kcl_assemble@/lib/zfsbootmenu-kcl.sh (1,631 microseconds, 0.02%)</title><rect x="1464.6" y="165" width="0.3" height="31.0" fill="rgb(249,144,13)" rx="2" ry="2" />
+<text  x="1467.59" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,569 microseconds, 0.22%)</title><rect x="1460.9" y="165" width="3.5" height="31.0" fill="rgb(229,226,53)" rx="2" ry="2" />
+<text  x="1463.95" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (22,001 microseconds, 0.28%)</title><rect x="826.2" y="165" width="4.4" height="31.0" fill="rgb(207,17,53)" rx="2" ry="2" />
+<text  x="829.21" y="183.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (6,220 microseconds, 0.08%)</title><rect x="55.3" y="165" width="1.2" height="31.0" fill="rgb(236,111,30)" rx="2" ry="2" />
+<text  x="58.26" y="183.5" ></text>
+</g>
+<g >
+<title>main@/libexec/zfsbootmenu-init (635,297 microseconds, 7.96%)</title><rect x="69.3" y="229" width="125.7" height="31.0" fill="rgb(209,198,31)" rx="2" ry="2" />
+<text  x="72.29" y="247.5" >main@/libexec/z..</text>
+</g>
+<g >
+<title>draw_kernel@/lib/zfsbootmenu-lib.sh (507,533 microseconds, 6.36%)</title><rect x="1468.0" y="197" width="100.4" height="31.0" fill="rgb(220,224,33)" rx="2" ry="2" />
+<text  x="1471.00" y="215.5" >draw_kernel@..</text>
+</g>
+<g >
+<title>traperror@/lib/kmsg-log-lib.sh (17,852 microseconds, 0.22%)</title><rect x="81.3" y="197" width="3.6" height="31.0" fill="rgb(215,21,30)" rx="2" ry="2" />
+<text  x="84.33" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,310 microseconds, 0.22%)</title><rect x="1435.2" y="165" width="3.5" height="31.0" fill="rgb(221,0,30)" rx="2" ry="2" />
+<text  x="1438.23" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-kcl.sh (1,602 microseconds, 0.02%)</title><rect x="737.7" y="165" width="0.3" height="31.0" fill="rgb(237,44,38)" rx="2" ry="2" />
+<text  x="740.68" y="183.5" ></text>
+</g>
+<g >
+<title>zinfo@/lib/kmsg-log-lib.sh (2,485 microseconds, 0.03%)</title><rect x="62.7" y="165" width="0.5" height="31.0" fill="rgb(229,67,38)" rx="2" ry="2" />
+<text  x="65.71" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (16,872 microseconds, 0.21%)</title><rect x="751.2" y="165" width="3.3" height="31.0" fill="rgb(219,110,22)" rx="2" ry="2" />
+<text  x="754.20" y="183.5" ></text>
+</g>
+<g >
+<title>center_string@/lib/zfsbootmenu-core.sh (1,300 microseconds, 0.02%)</title><rect x="903.3" y="197" width="0.3" height="31.0" fill="rgb(226,201,49)" rx="2" ry="2" />
+<text  x="906.31" y="215.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-preinit.sh (8,041 microseconds, 0.10%)</title><rect x="67.7" y="197" width="1.6" height="31.0" fill="rgb(231,169,18)" rx="2" ry="2" />
+<text  x="70.70" y="215.5" ></text>
+</g>
+<g >
+<title>draw_pool_status@/lib/zfsbootmenu-lib.sh (37,221 microseconds, 0.47%)</title><rect x="1582.6" y="197" width="7.4" height="31.0" fill="rgb(252,205,14)" rx="2" ry="2" />
+<text  x="1585.63" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (18,445 microseconds, 0.23%)</title><rect x="686.0" y="133" width="3.6" height="31.0" fill="rgb(241,89,21)" rx="2" ry="2" />
+<text  x="688.97" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,837 microseconds, 0.30%)</title><rect x="677.8" y="133" width="4.7" height="31.0" fill="rgb(254,16,16)" rx="2" ry="2" />
+<text  x="680.80" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (22,819 microseconds, 0.29%)</title><rect x="269.1" y="133" width="4.6" height="31.0" fill="rgb(229,98,13)" rx="2" ry="2" />
+<text  x="272.14" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (16,710 microseconds, 0.21%)</title><rect x="887.0" y="165" width="3.3" height="31.0" fill="rgb(252,59,28)" rx="2" ry="2" />
+<text  x="890.01" y="183.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (30,085 microseconds, 0.38%)</title><rect x="436.5" y="165" width="6.0" height="31.0" fill="rgb(205,194,30)" rx="2" ry="2" />
+<text  x="439.54" y="183.5" ></text>
+</g>
+<g >
+<title>is_efi_system@/lib/zfsbootmenu-core.sh (2,460 microseconds, 0.03%)</title><rect x="76.8" y="165" width="0.5" height="31.0" fill="rgb(243,70,4)" rx="2" ry="2" />
+<text  x="79.82" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (11,994 microseconds, 0.15%)</title><rect x="203.0" y="197" width="2.4" height="31.0" fill="rgb(244,8,14)" rx="2" ry="2" />
+<text  x="206.00" y="215.5" ></text>
+</g>
+<g >
+<title>kcl_assemble@/lib/zfsbootmenu-kcl.sh (1,723 microseconds, 0.02%)</title><rect x="725.8" y="165" width="0.4" height="31.0" fill="rgb(215,191,44)" rx="2" ry="2" />
+<text  x="728.83" y="183.5" ></text>
+</g>
+<g >
+<title>kcl_append@/lib/zfsbootmenu-kcl.sh (3,248 microseconds, 0.04%)</title><rect x="824.0" y="165" width="0.7" height="31.0" fill="rgb(221,34,36)" rx="2" ry="2" />
+<text  x="827.04" y="183.5" ></text>
+</g>
+<g >
+<title>zinfo@/lib/kmsg-log-lib.sh (2,499 microseconds, 0.03%)</title><rect x="65.9" y="165" width="0.5" height="31.0" fill="rgb(212,56,41)" rx="2" ry="2" />
+<text  x="68.91" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/kmsg-log-lib.sh (4,198 microseconds, 0.05%)</title><rect x="736.3" y="197" width="0.8" height="31.0" fill="rgb(228,205,52)" rx="2" ry="2" />
+<text  x="739.30" y="215.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (37,010 microseconds, 0.46%)</title><rect x="851.6" y="165" width="7.3" height="31.0" fill="rgb(210,5,18)" rx="2" ry="2" />
+<text  x="854.57" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,250 microseconds, 0.29%)</title><rect x="1418.7" y="133" width="4.6" height="31.0" fill="rgb(225,70,37)" rx="2" ry="2" />
+<text  x="1421.72" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (16,612 microseconds, 0.21%)</title><rect x="81.6" y="165" width="3.3" height="31.0" fill="rgb(208,147,34)" rx="2" ry="2" />
+<text  x="84.57" y="183.5" ></text>
+</g>
+<g >
+<title>main@/bin/zfsbootmenu (805,537 microseconds, 10.09%)</title><rect x="1217.9" y="229" width="159.4" height="31.0" fill="rgb(236,23,17)" rx="2" ry="2" />
+<text  x="1220.89" y="247.5" >main@/bin/zfsbootmenu</text>
+</g>
+<g >
+<title>center_string@/lib/zfsbootmenu-core.sh (2,005 microseconds, 0.03%)</title><rect x="1214.9" y="197" width="0.4" height="31.0" fill="rgb(237,191,17)" rx="2" ry="2" />
+<text  x="1217.90" y="215.5" ></text>
+</g>
+<g >
+<title>be_has_encroot@/lib/zfsbootmenu-core.sh (116,824 microseconds, 1.46%)</title><rect x="494.2" y="69" width="23.1" height="31.0" fill="rgb(226,213,41)" rx="2" ry="2" />
+<text  x="497.22" y="87.5" >b..</text>
+</g>
+<g >
+<title>load_be_cmdline@/lib/zfsbootmenu-core.sh (83,935 microseconds, 1.05%)</title><rect x="1448.7" y="197" width="16.6" height="31.0" fill="rgb(222,170,38)" rx="2" ry="2" />
+<text  x="1451.68" y="215.5" ></text>
+</g>
+<g >
+<title>source@/lib/kmsg-log-lib.sh (3,935 microseconds, 0.05%)</title><rect x="1155.7" y="197" width="0.8" height="31.0" fill="rgb(249,74,43)" rx="2" ry="2" />
+<text  x="1158.74" y="215.5" ></text>
+</g>
+<g >
+<title>get_sort_key@/lib/zfsbootmenu-lib.sh (32,958 microseconds, 0.41%)</title><rect x="1128.0" y="165" width="6.5" height="31.0" fill="rgb(207,213,19)" rx="2" ry="2" />
+<text  x="1131.00" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (27,958 microseconds, 0.35%)</title><rect x="852.6" y="133" width="5.5" height="31.0" fill="rgb(254,112,42)" rx="2" ry="2" />
+<text  x="855.61" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (21,990 microseconds, 0.28%)</title><rect x="235.8" y="133" width="4.3" height="31.0" fill="rgb(210,160,15)" rx="2" ry="2" />
+<text  x="238.80" y="151.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-core.sh (5,762 microseconds, 0.07%)</title><rect x="841.1" y="197" width="1.1" height="31.0" fill="rgb(245,173,10)" rx="2" ry="2" />
+<text  x="844.10" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (15,501 microseconds, 0.19%)</title><rect x="1381.6" y="197" width="3.1" height="31.0" fill="rgb(218,42,46)" rx="2" ry="2" />
+<text  x="1384.62" y="215.5" ></text>
+</g>
+<g >
+<title>select_kernel@/lib/zfsbootmenu-core.sh (80,950 microseconds, 1.01%)</title><rect x="1413.4" y="197" width="16.0" height="31.0" fill="rgb(247,87,8)" rx="2" ry="2" />
+<text  x="1416.39" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,614 microseconds, 0.22%)</title><rect x="633.2" y="165" width="3.5" height="31.0" fill="rgb(233,5,21)" rx="2" ry="2" />
+<text  x="636.20" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,609 microseconds, 0.30%)</title><rect x="790.9" y="133" width="4.7" height="31.0" fill="rgb(210,101,43)" rx="2" ry="2" />
+<text  x="793.93" y="151.5" ></text>
+</g>
+<g >
+<title>is_writable@/lib/zfsbootmenu-core.sh (45,326 microseconds, 0.57%)</title><rect x="764.4" y="197" width="9.0" height="31.0" fill="rgb(238,225,46)" rx="2" ry="2" />
+<text  x="767.42" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,385 microseconds, 0.29%)</title><rect x="744.2" y="133" width="4.7" height="31.0" fill="rgb(228,138,27)" rx="2" ry="2" />
+<text  x="747.23" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,240 microseconds, 0.22%)</title><rect x="1192.3" y="165" width="3.4" height="31.0" fill="rgb(247,160,43)" rx="2" ry="2" />
+<text  x="1195.26" y="183.5" ></text>
+</g>
+<g >
+<title>draw_snapshots@/lib/zfsbootmenu-lib.sh (157,294 microseconds, 1.97%)</title><rect x="1121.9" y="197" width="31.1" height="31.0" fill="rgb(235,104,4)" rx="2" ry="2" />
+<text  x="1124.86" y="215.5" >dr..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (32,303 microseconds, 0.40%)</title><rect x="1569.4" y="165" width="6.4" height="31.0" fill="rgb(238,26,10)" rx="2" ry="2" />
+<text  x="1572.43" y="183.5" ></text>
+</g>
+<g >
+<title>zinfo@/lib/kmsg-log-lib.sh (2,599 microseconds, 0.03%)</title><rect x="34.9" y="165" width="0.5" height="31.0" fill="rgb(213,103,38)" rx="2" ry="2" />
+<text  x="37.86" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-core.sh (3,484 microseconds, 0.04%)</title><rect x="72.9" y="197" width="0.7" height="31.0" fill="rgb(219,18,51)" rx="2" ry="2" />
+<text  x="75.87" y="215.5" ></text>
+</g>
+<g >
+<title>colorize@/lib/zfsbootmenu-core.sh (6,166 microseconds, 0.08%)</title><rect x="1151.8" y="165" width="1.2" height="31.0" fill="rgb(229,48,44)" rx="2" ry="2" />
+<text  x="1154.76" y="183.5" ></text>
+</g>
+<g >
+<title>main@/bin/zfsbootmenu (136,774 microseconds, 1.71%)</title><rect x="1377.5" y="229" width="27.0" height="31.0" fill="rgb(229,144,31)" rx="2" ry="2" />
+<text  x="1380.48" y="247.5" >m..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (21,888 microseconds, 0.27%)</title><rect x="657.7" y="165" width="4.4" height="31.0" fill="rgb(218,76,30)" rx="2" ry="2" />
+<text  x="660.74" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,236 microseconds, 0.29%)</title><rect x="352.4" y="133" width="4.6" height="31.0" fill="rgb(212,112,13)" rx="2" ry="2" />
+<text  x="355.38" y="151.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (69,527 microseconds, 0.87%)</title><rect x="14.2" y="165" width="13.8" height="31.0" fill="rgb(243,152,5)" rx="2" ry="2" />
+<text  x="17.25" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (30,207 microseconds, 0.38%)</title><rect x="422.5" y="101" width="6.0" height="31.0" fill="rgb(222,196,7)" rx="2" ry="2" />
+<text  x="425.49" y="119.5" ></text>
+</g>
+<g >
+<title>source@/etc/zfsbootmenu.conf (12,802 microseconds, 0.16%)</title><rect x="195.3" y="197" width="2.5" height="31.0" fill="rgb(253,24,17)" rx="2" ry="2" />
+<text  x="198.27" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,498 microseconds, 0.29%)</title><rect x="891.5" y="133" width="4.6" height="31.0" fill="rgb(248,209,16)" rx="2" ry="2" />
+<text  x="894.49" y="151.5" ></text>
+</g>
+<g >
+<title>csv_cat@/lib/zfsbootmenu-lib.sh (22,322 microseconds, 0.28%)</title><rect x="1102.1" y="165" width="4.4" height="31.0" fill="rgb(248,47,27)" rx="2" ry="2" />
+<text  x="1105.11" y="183.5" ></text>
+</g>
+<g >
+<title>be_is_locked@/lib/zfsbootmenu-core.sh (167,653 microseconds, 2.10%)</title><rect x="275.3" y="101" width="33.2" height="31.0" fill="rgb(254,100,53)" rx="2" ry="2" />
+<text  x="278.29" y="119.5" >be..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,571 microseconds, 0.22%)</title><rect x="760.4" y="165" width="3.4" height="31.0" fill="rgb(210,43,48)" rx="2" ry="2" />
+<text  x="763.37" y="183.5" ></text>
+</g>
+<g >
+<title>zreport@/lib/zfsbootmenu-core.sh (20,017 microseconds, 0.25%)</title><rect x="156.5" y="197" width="4.0" height="31.0" fill="rgb(232,7,24)" rx="2" ry="2" />
+<text  x="159.49" y="215.5" ></text>
+</g>
+<g >
+<title>be_is_locked@/lib/zfsbootmenu-core.sh (136,482 microseconds, 1.71%)</title><rect x="240.6" y="133" width="27.0" height="31.0" fill="rgb(226,158,39)" rx="2" ry="2" />
+<text  x="243.55" y="151.5" >b..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,339 microseconds, 0.22%)</title><rect x="1414.1" y="165" width="3.4" height="31.0" fill="rgb(222,34,15)" rx="2" ry="2" />
+<text  x="1417.09" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-core.sh (3,592 microseconds, 0.04%)</title><rect x="1411.7" y="197" width="0.7" height="31.0" fill="rgb(211,124,43)" rx="2" ry="2" />
+<text  x="1414.65" y="215.5" ></text>
+</g>
+<g >
+<title>center_string@/lib/zfsbootmenu-core.sh (1,639 microseconds, 0.02%)</title><rect x="730.6" y="197" width="0.3" height="31.0" fill="rgb(220,216,1)" rx="2" ry="2" />
+<text  x="733.59" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (21,976 microseconds, 0.28%)</title><rect x="651.8" y="165" width="4.3" height="31.0" fill="rgb(215,56,21)" rx="2" ry="2" />
+<text  x="654.77" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/kmsg-log-lib.sh (4,046 microseconds, 0.05%)</title><rect x="74.3" y="197" width="0.8" height="31.0" fill="rgb(233,192,17)" rx="2" ry="2" />
+<text  x="77.26" y="215.5" ></text>
+</g>
+<g >
+<title>column_wrap@/lib/zfsbootmenu-lib.sh (19,060 microseconds, 0.24%)</title><rect x="619.0" y="165" width="3.8" height="31.0" fill="rgb(254,149,30)" rx="2" ry="2" />
+<text  x="622.05" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (28,278 microseconds, 0.35%)</title><rect x="228.3" y="133" width="5.6" height="31.0" fill="rgb(216,203,39)" rx="2" ry="2" />
+<text  x="231.30" y="151.5" ></text>
+</g>
+<g >
+<title>kcl_tokenize@/lib/zfsbootmenu-kcl.sh (2,603 microseconds, 0.03%)</title><rect x="17.9" y="69" width="0.6" height="31.0" fill="rgb(226,57,34)" rx="2" ry="2" />
+<text  x="20.94" y="87.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-core.sh (1,574 microseconds, 0.02%)</title><rect x="199.9" y="165" width="0.3" height="31.0" fill="rgb(224,13,20)" rx="2" ry="2" />
+<text  x="202.86" y="183.5" ></text>
+</g>
+<g >
+<title>center_string@/lib/zfsbootmenu-core.sh (1,370 microseconds, 0.02%)</title><rect x="731.2" y="197" width="0.3" height="31.0" fill="rgb(252,0,46)" rx="2" ry="2" />
+<text  x="734.24" y="215.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (9,978 microseconds, 0.12%)</title><rect x="45.1" y="133" width="2.0" height="31.0" fill="rgb(225,195,13)" rx="2" ry="2" />
+<text  x="48.11" y="151.5" ></text>
+</g>
+<g >
+<title>get_spl_hostid@/lib/zfsbootmenu-core.sh (45,526 microseconds, 0.57%)</title><rect x="797.1" y="165" width="9.0" height="31.0" fill="rgb(229,48,31)" rx="2" ry="2" />
+<text  x="800.09" y="183.5" ></text>
+</g>
+<g >
+<title>read_kcl_prop@/lib/zfsbootmenu-kcl.sh (23,602 microseconds, 0.30%)</title><rect x="685.0" y="165" width="4.7" height="31.0" fill="rgb(224,11,23)" rx="2" ry="2" />
+<text  x="687.99" y="183.5" ></text>
+</g>
+<g >
+<title>validate_cmdline_cache@/lib/zfsbootmenu-core.sh (5,278 microseconds, 0.07%)</title><rect x="1459.7" y="165" width="1.1" height="31.0" fill="rgb(243,203,13)" rx="2" ry="2" />
+<text  x="1462.72" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (22,870 microseconds, 0.29%)</title><rect x="709.5" y="165" width="4.6" height="31.0" fill="rgb(210,220,34)" rx="2" ry="2" />
+<text  x="712.55" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (89,612 microseconds, 1.12%)</title><rect x="160.5" y="197" width="17.7" height="31.0" fill="rgb(226,125,41)" rx="2" ry="2" />
+<text  x="163.46" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,037 microseconds, 0.21%)</title><rect x="1178.6" y="165" width="3.3" height="31.0" fill="rgb(250,58,43)" rx="2" ry="2" />
+<text  x="1181.58" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (30,906 microseconds, 0.39%)</title><rect x="537.4" y="101" width="6.1" height="31.0" fill="rgb(254,170,17)" rx="2" ry="2" />
+<text  x="540.38" y="119.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (49,751 microseconds, 0.62%)</title><rect x="585.9" y="101" width="9.9" height="31.0" fill="rgb(236,28,35)" rx="2" ry="2" />
+<text  x="588.93" y="119.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (31,387 microseconds, 0.39%)</title><rect x="676.9" y="165" width="6.2" height="31.0" fill="rgb(234,169,3)" rx="2" ry="2" />
+<text  x="679.93" y="183.5" ></text>
+</g>
+<g >
+<title>main@/libexec/zfsbootmenu-initcpio (299,589 microseconds, 3.75%)</title><rect x="10.0" y="229" width="59.3" height="31.0" fill="rgb(207,118,29)" rx="2" ry="2" />
+<text  x="13.00" y="247.5" >main@/..</text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-kcl.sh (1,547 microseconds, 0.02%)</title><rect x="1412.1" y="165" width="0.3" height="31.0" fill="rgb(219,39,25)" rx="2" ry="2" />
+<text  x="1415.06" y="183.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (6,362 microseconds, 0.08%)</title><rect x="63.7" y="165" width="1.2" height="31.0" fill="rgb(250,37,24)" rx="2" ry="2" />
+<text  x="66.67" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-kcl.sh (2,857 microseconds, 0.04%)</title><rect x="841.7" y="165" width="0.5" height="31.0" fill="rgb(225,178,37)" rx="2" ry="2" />
+<text  x="844.68" y="183.5" ></text>
+</g>
+<g >
+<title>load_key@/lib/zfsbootmenu-core.sh (178,233 microseconds, 2.23%)</title><rect x="442.8" y="165" width="35.2" height="31.0" fill="rgb(241,76,46)" rx="2" ry="2" />
+<text  x="445.76" y="183.5" >lo..</text>
+</g>
+<g >
+<title>colorize@/lib/zfsbootmenu-core.sh (5,531 microseconds, 0.07%)</title><rect x="1216.5" y="197" width="1.1" height="31.0" fill="rgb(242,100,0)" rx="2" ry="2" />
+<text  x="1219.54" y="215.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (8,266 microseconds, 0.10%)</title><rect x="30.6" y="165" width="1.6" height="31.0" fill="rgb(250,116,13)" rx="2" ry="2" />
+<text  x="33.58" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (22,731 microseconds, 0.28%)</title><rect x="479.3" y="133" width="4.5" height="31.0" fill="rgb(229,189,31)" rx="2" ry="2" />
+<text  x="482.34" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (37,021 microseconds, 0.46%)</title><rect x="578.0" y="101" width="7.4" height="31.0" fill="rgb(238,181,47)" rx="2" ry="2" />
+<text  x="581.03" y="119.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (30,161 microseconds, 0.38%)</title><rect x="402.7" y="101" width="6.0" height="31.0" fill="rgb(253,169,11)" rx="2" ry="2" />
+<text  x="405.69" y="119.5" ></text>
+</g>
+<g >
+<title>kcl_suppress@/lib/zfsbootmenu-kcl.sh (1,153 microseconds, 0.01%)</title><rect x="815.0" y="165" width="0.3" height="31.0" fill="rgb(237,56,12)" rx="2" ry="2" />
+<text  x="818.02" y="183.5" ></text>
+</g>
+<g >
+<title>kcl_append@/lib/zfsbootmenu-kcl.sh (2,850 microseconds, 0.04%)</title><rect x="724.7" y="165" width="0.6" height="31.0" fill="rgb(215,62,4)" rx="2" ry="2" />
+<text  x="727.72" y="183.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (30,962 microseconds, 0.39%)</title><rect x="890.7" y="165" width="6.1" height="31.0" fill="rgb(240,195,1)" rx="2" ry="2" />
+<text  x="893.65" y="183.5" ></text>
+</g>
+<g >
+<title>select_kernel@/lib/zfsbootmenu-core.sh (79,224 microseconds, 0.99%)</title><rect x="739.0" y="197" width="15.7" height="31.0" fill="rgb(221,3,22)" rx="2" ry="2" />
+<text  x="742.02" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (18,498 microseconds, 0.23%)</title><rect x="877.5" y="165" width="3.7" height="31.0" fill="rgb(215,150,33)" rx="2" ry="2" />
+<text  x="880.55" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (13,977 microseconds, 0.18%)</title><rect x="153.5" y="197" width="2.7" height="31.0" fill="rgb(220,70,29)" rx="2" ry="2" />
+<text  x="156.47" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (24,022 microseconds, 0.30%)</title><rect x="558.1" y="133" width="4.8" height="31.0" fill="rgb(245,170,32)" rx="2" ry="2" />
+<text  x="561.13" y="151.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-kcl.sh (1,517 microseconds, 0.02%)</title><rect x="73.3" y="165" width="0.3" height="31.0" fill="rgb(205,158,42)" rx="2" ry="2" />
+<text  x="76.26" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,625 microseconds, 0.22%)</title><rect x="663.7" y="165" width="3.5" height="31.0" fill="rgb(233,170,41)" rx="2" ry="2" />
+<text  x="666.69" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,180 microseconds, 0.29%)</title><rect x="395.8" y="133" width="4.6" height="31.0" fill="rgb(207,154,13)" rx="2" ry="2" />
+<text  x="398.78" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (35,398 microseconds, 0.44%)</title><rect x="331.0" y="101" width="7.0" height="31.0" fill="rgb(212,163,18)" rx="2" ry="2" />
+<text  x="333.99" y="119.5" ></text>
+</g>
+<g >
+<title>load_be_cmdline@/lib/zfsbootmenu-core.sh (91,739 microseconds, 1.15%)</title><rect x="1196.7" y="197" width="18.2" height="31.0" fill="rgb(216,72,42)" rx="2" ry="2" />
+<text  x="1199.74" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (40,441 microseconds, 0.51%)</title><rect x="140.5" y="165" width="8.0" height="31.0" fill="rgb(214,47,9)" rx="2" ry="2" />
+<text  x="143.47" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,382 microseconds, 0.22%)</title><rect x="673.2" y="165" width="3.4" height="31.0" fill="rgb(217,100,41)" rx="2" ry="2" />
+<text  x="676.16" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,277 microseconds, 0.22%)</title><rect x="1430.6" y="165" width="3.4" height="31.0" fill="rgb(241,49,54)" rx="2" ry="2" />
+<text  x="1433.63" y="183.5" ></text>
+</g>
+<g >
+<title>be_has_encroot@/lib/zfsbootmenu-core.sh (109,840 microseconds, 1.38%)</title><rect x="286.1" y="69" width="21.8" height="31.0" fill="rgb(252,165,41)" rx="2" ry="2" />
+<text  x="289.14" y="87.5" >b..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (29,369 microseconds, 0.37%)</title><rect x="845.2" y="165" width="5.8" height="31.0" fill="rgb(228,187,41)" rx="2" ry="2" />
+<text  x="848.23" y="183.5" ></text>
+</g>
+<g >
+<title>draw_be@/lib/zfsbootmenu-lib.sh (59,525 microseconds, 0.75%)</title><rect x="613.1" y="197" width="11.8" height="31.0" fill="rgb(214,152,41)" rx="2" ry="2" />
+<text  x="616.13" y="215.5" ></text>
+</g>
+<g >
+<title>is_writable@/lib/zfsbootmenu-core.sh (44,400 microseconds, 0.56%)</title><rect x="1439.2" y="197" width="8.8" height="31.0" fill="rgb(214,96,15)" rx="2" ry="2" />
+<text  x="1442.21" y="215.5" ></text>
+</g>
+<g >
+<title>be_has_encroot@/lib/zfsbootmenu-core.sh (45,781 microseconds, 0.57%)</title><rect x="755.1" y="197" width="9.1" height="31.0" fill="rgb(218,197,44)" rx="2" ry="2" />
+<text  x="758.10" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,186 microseconds, 0.22%)</title><rect x="860.8" y="165" width="3.4" height="31.0" fill="rgb(229,212,54)" rx="2" ry="2" />
+<text  x="863.80" y="183.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (9,023 microseconds, 0.11%)</title><rect x="32.7" y="165" width="1.8" height="31.0" fill="rgb(253,115,3)" rx="2" ry="2" />
+<text  x="35.70" y="183.5" ></text>
+</g>
+<g >
+<title>main@/bin/zfsbootmenu (1,016,823 microseconds, 12.74%)</title><rect x="905.3" y="229" width="201.2" height="31.0" fill="rgb(235,228,18)" rx="2" ry="2" />
+<text  x="908.29" y="247.5" >main@/bin/zfsbootmenu</text>
+</g>
+<g >
+<title>center_string@/lib/zfsbootmenu-core.sh (1,684 microseconds, 0.02%)</title><rect x="902.6" y="197" width="0.4" height="31.0" fill="rgb(205,151,44)" rx="2" ry="2" />
+<text  x="905.64" y="215.5" ></text>
+</g>
+<g >
+<title>populate_be_list@/lib/zfsbootmenu-lib.sh (2,031,801 microseconds, 25.45%)</title><rect x="210.7" y="197" width="402.1" height="31.0" fill="rgb(217,120,41)" rx="2" ry="2" />
+<text  x="213.72" y="215.5" >populate_be_list@/lib/zfsbootmenu-lib.sh</text>
+</g>
+<g >
+<title>kcl_suppress@/lib/zfsbootmenu-kcl.sh (1,478 microseconds, 0.02%)</title><rect x="815.3" y="165" width="0.3" height="31.0" fill="rgb(245,225,38)" rx="2" ry="2" />
+<text  x="818.28" y="183.5" ></text>
+</g>
+<g >
+<title>center_string@/lib/zfsbootmenu-core.sh (1,704 microseconds, 0.02%)</title><rect x="1465.3" y="197" width="0.3" height="31.0" fill="rgb(230,78,27)" rx="2" ry="2" />
+<text  x="1468.29" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (19,599 microseconds, 0.25%)</title><rect x="726.5" y="165" width="3.9" height="31.0" fill="rgb(254,15,10)" rx="2" ry="2" />
+<text  x="729.54" y="183.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (7,372 microseconds, 0.09%)</title><rect x="60.5" y="133" width="1.5" height="31.0" fill="rgb(207,131,39)" rx="2" ry="2" />
+<text  x="63.51" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (37,081 microseconds, 0.46%)</title><rect x="323.4" y="101" width="7.3" height="31.0" fill="rgb(225,199,7)" rx="2" ry="2" />
+<text  x="326.38" y="119.5" ></text>
+</g>
+<g >
+<title>get_zbm_bool@/lib/zfsbootmenu-kcl.sh (17,636 microseconds, 0.22%)</title><rect x="37.3" y="165" width="3.5" height="31.0" fill="rgb(216,163,17)" rx="2" ry="2" />
+<text  x="40.33" y="183.5" ></text>
+</g>
+<g >
+<title>column_wrap@/lib/zfsbootmenu-lib.sh (20,873 microseconds, 0.26%)</title><rect x="1398.3" y="165" width="4.2" height="31.0" fill="rgb(254,74,42)" rx="2" ry="2" />
+<text  x="1401.35" y="183.5" ></text>
+</g>
+<g >
+<title>source@/etc/zfsbootmenu.conf (21,609 microseconds, 0.27%)</title><rect x="834.8" y="197" width="4.3" height="31.0" fill="rgb(229,20,13)" rx="2" ry="2" />
+<text  x="837.80" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (22,601 microseconds, 0.28%)</title><rect x="1165.0" y="133" width="4.5" height="31.0" fill="rgb(216,123,9)" rx="2" ry="2" />
+<text  x="1167.98" y="151.5" ></text>
+</g>
+<g >
+<title>colorize@/lib/zfsbootmenu-core.sh (5,426 microseconds, 0.07%)</title><rect x="904.0" y="197" width="1.0" height="31.0" fill="rgb(228,144,54)" rx="2" ry="2" />
+<text  x="906.97" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,582 microseconds, 0.22%)</title><rect x="806.4" y="165" width="3.4" height="31.0" fill="rgb(225,105,35)" rx="2" ry="2" />
+<text  x="809.35" y="183.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (38,662 microseconds, 0.48%)</title><rect x="1201.1" y="165" width="7.7" height="31.0" fill="rgb(233,199,16)" rx="2" ry="2" />
+<text  x="1204.14" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-kcl.sh (1,973 microseconds, 0.02%)</title><rect x="630.5" y="165" width="0.4" height="31.0" fill="rgb(231,57,44)" rx="2" ry="2" />
+<text  x="633.47" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,533 microseconds, 0.22%)</title><rect x="1449.4" y="165" width="3.5" height="31.0" fill="rgb(215,200,22)" rx="2" ry="2" />
+<text  x="1452.39" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/kmsg-log-lib.sh (4,043 microseconds, 0.05%)</title><rect x="1410.7" y="197" width="0.8" height="31.0" fill="rgb(213,7,13)" rx="2" ry="2" />
+<text  x="1413.71" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (15,694 microseconds, 0.20%)</title><rect x="1394.9" y="165" width="3.1" height="31.0" fill="rgb(248,186,37)" rx="2" ry="2" />
+<text  x="1397.89" y="183.5" ></text>
+</g>
+<g >
+<title>is_writable@/lib/zfsbootmenu-core.sh (44,599 microseconds, 0.56%)</title><rect x="1187.2" y="197" width="8.8" height="31.0" fill="rgb(232,103,12)" rx="2" ry="2" />
+<text  x="1190.15" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,742 microseconds, 0.22%)</title><rect x="646.5" y="165" width="3.5" height="31.0" fill="rgb(212,210,44)" rx="2" ry="2" />
+<text  x="649.53" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (46,183 microseconds, 0.58%)</title><rect x="298.2" y="37" width="9.1" height="31.0" fill="rgb(248,202,42)" rx="2" ry="2" />
+<text  x="301.20" y="55.5" ></text>
+</g>
+<g >
+<title>main@/libexec/zfsbootmenu-preview (327,983 microseconds, 4.11%)</title><rect x="1153.0" y="229" width="64.9" height="31.0" fill="rgb(208,16,19)" rx="2" ry="2" />
+<text  x="1155.99" y="247.5" >main@/l..</text>
+</g>
+<g >
+<title>source@/etc/zfsbootmenu.conf (12,814 microseconds, 0.16%)</title><rect x="69.5" y="197" width="2.6" height="31.0" fill="rgb(230,124,2)" rx="2" ry="2" />
+<text  x="72.54" y="215.5" ></text>
+</g>
+<g >
+<title>source@/etc/zfsbootmenu.conf (12,531 microseconds, 0.16%)</title><rect x="1153.1" y="197" width="2.5" height="31.0" fill="rgb(206,154,33)" rx="2" ry="2" />
+<text  x="1156.13" y="215.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (8,570 microseconds, 0.11%)</title><rect x="52.8" y="165" width="1.7" height="31.0" fill="rgb(222,218,1)" rx="2" ry="2" />
+<text  x="55.85" y="183.5" ></text>
+</g>
+<g >
+<title>source@/etc/zfsbootmenu.conf (17,114 microseconds, 0.21%)</title><rect x="625.1" y="197" width="3.4" height="31.0" fill="rgb(205,74,14)" rx="2" ry="2" />
+<text  x="628.10" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (37,385 microseconds, 0.47%)</title><rect x="310.1" y="69" width="7.4" height="31.0" fill="rgb(207,0,49)" rx="2" ry="2" />
+<text  x="313.14" y="87.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (30,618 microseconds, 0.38%)</title><rect x="1107.5" y="165" width="6.0" height="31.0" fill="rgb(235,222,40)" rx="2" ry="2" />
+<text  x="1110.49" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (44,467 microseconds, 0.56%)</title><rect x="410.5" y="69" width="8.8" height="31.0" fill="rgb(214,119,51)" rx="2" ry="2" />
+<text  x="413.47" y="87.5" ></text>
+</g>
+<g >
+<title>be_has_encroot@/lib/zfsbootmenu-core.sh (45,545 microseconds, 0.57%)</title><rect x="1429.9" y="197" width="9.1" height="31.0" fill="rgb(242,125,0)" rx="2" ry="2" />
+<text  x="1432.94" y="215.5" ></text>
+</g>
+<g >
+<title>global_header@/lib/zfsbootmenu-lib.sh (6,222 microseconds, 0.08%)</title><rect x="1403.3" y="165" width="1.2" height="31.0" fill="rgb(252,188,28)" rx="2" ry="2" />
+<text  x="1406.31" y="183.5" ></text>
+</g>
+<g >
+<title>check_for_pools@/lib/zfsbootmenu-core.sh (13,431 microseconds, 0.17%)</title><rect x="149.2" y="197" width="2.6" height="31.0" fill="rgb(220,69,2)" rx="2" ry="2" />
+<text  x="152.19" y="215.5" ></text>
+</g>
+<g >
+<title>is_writable@/lib/zfsbootmenu-core.sh (45,556 microseconds, 0.57%)</title><rect x="662.8" y="197" width="9.0" height="31.0" fill="rgb(206,162,9)" rx="2" ry="2" />
+<text  x="665.81" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (16,656 microseconds, 0.21%)</title><rect x="1187.8" y="165" width="3.3" height="31.0" fill="rgb(214,56,34)" rx="2" ry="2" />
+<text  x="1190.81" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (27,161 microseconds, 0.34%)</title><rect x="443.8" y="133" width="5.3" height="31.0" fill="rgb(238,81,44)" rx="2" ry="2" />
+<text  x="446.76" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (28,046 microseconds, 0.35%)</title><rect x="429.6" y="133" width="5.5" height="31.0" fill="rgb(219,126,45)" rx="2" ry="2" />
+<text  x="432.57" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (20,700 microseconds, 0.26%)</title><rect x="614.2" y="165" width="4.1" height="31.0" fill="rgb(229,74,27)" rx="2" ry="2" />
+<text  x="617.16" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,557 microseconds, 0.22%)</title><rect x="93.2" y="165" width="3.5" height="31.0" fill="rgb(209,23,33)" rx="2" ry="2" />
+<text  x="96.20" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (43,739 microseconds, 0.55%)</title><rect x="458.1" y="69" width="8.7" height="31.0" fill="rgb(251,156,14)" rx="2" ry="2" />
+<text  x="461.14" y="87.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (37,831 microseconds, 0.47%)</title><rect x="778.7" y="165" width="7.5" height="31.0" fill="rgb(209,197,17)" rx="2" ry="2" />
+<text  x="781.67" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (37,374 microseconds, 0.47%)</title><rect x="486.3" y="69" width="7.4" height="31.0" fill="rgb(215,23,46)" rx="2" ry="2" />
+<text  x="489.30" y="87.5" ></text>
+</g>
+<g >
+<title>source@/lib/kmsg-log-lib.sh (5,313 microseconds, 0.07%)</title><rect x="28.4" y="165" width="1.0" height="31.0" fill="rgb(251,131,51)" rx="2" ry="2" />
+<text  x="31.39" y="183.5" ></text>
+</g>
+<g >
+<title>kcl_suppress@/lib/zfsbootmenu-kcl.sh (2,675 microseconds, 0.03%)</title><rect x="814.4" y="165" width="0.5" height="31.0" fill="rgb(212,15,15)" rx="2" ry="2" />
+<text  x="817.41" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,333 microseconds, 0.22%)</title><rect x="898.4" y="165" width="3.4" height="31.0" fill="rgb(232,187,16)" rx="2" ry="2" />
+<text  x="901.35" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (27,126 microseconds, 0.34%)</title><rect x="1388.4" y="133" width="5.3" height="31.0" fill="rgb(252,139,52)" rx="2" ry="2" />
+<text  x="1391.38" y="151.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (55,911 microseconds, 0.70%)</title><rect x="409.1" y="101" width="11.1" height="31.0" fill="rgb(229,206,37)" rx="2" ry="2" />
+<text  x="412.14" y="119.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (31,723 microseconds, 0.40%)</title><rect x="343.9" y="101" width="6.2" height="31.0" fill="rgb(229,38,52)" rx="2" ry="2" />
+<text  x="346.86" y="119.5" ></text>
+</g>
+<g >
+<title>draw_kernel@/lib/zfsbootmenu-lib.sh (37,148 microseconds, 0.47%)</title><rect x="1568.8" y="197" width="7.3" height="31.0" fill="rgb(229,139,33)" rx="2" ry="2" />
+<text  x="1571.77" y="215.5" ></text>
+</g>
+<g >
+<title>source@/etc/zfsbootmenu.conf (5,125 microseconds, 0.06%)</title><rect x="10.4" y="165" width="1.0" height="31.0" fill="rgb(217,67,10)" rx="2" ry="2" />
+<text  x="13.36" y="183.5" ></text>
+</g>
+<g >
+<title>load_be_cmdline@/lib/zfsbootmenu-core.sh (293,662 microseconds, 3.68%)</title><rect x="672.5" y="197" width="58.1" height="31.0" fill="rgb(224,113,4)" rx="2" ry="2" />
+<text  x="675.47" y="215.5" >load_b..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,065 microseconds, 0.29%)</title><rect x="1123.1" y="165" width="4.6" height="31.0" fill="rgb(210,31,50)" rx="2" ry="2" />
+<text  x="1126.09" y="183.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (9,634 microseconds, 0.12%)</title><rect x="38.5" y="133" width="1.9" height="31.0" fill="rgb(214,221,37)" rx="2" ry="2" />
+<text  x="41.48" y="151.5" ></text>
+</g>
+<g >
+<title>main@/bin/zfsbootmenu (507,533 microseconds, 6.36%)</title><rect x="1468.0" y="229" width="100.4" height="31.0" fill="rgb(217,219,34)" rx="2" ry="2" />
+<text  x="1471.00" y="247.5" >main@/bin/zf..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (11,928 microseconds, 0.15%)</title><rect x="206.2" y="197" width="2.3" height="31.0" fill="rgb(205,78,0)" rx="2" ry="2" />
+<text  x="209.16" y="215.5" ></text>
+</g>
+<g >
+<title>mount_zfs@/lib/zfsbootmenu-core.sh (385,456 microseconds, 4.83%)</title><rect x="274.1" y="133" width="76.3" height="31.0" fill="rgb(229,28,27)" rx="2" ry="2" />
+<text  x="277.07" y="151.5" >mount_zf..</text>
+</g>
+<g >
+<title>select_kernel@/lib/zfsbootmenu-core.sh (149,758 microseconds, 1.88%)</title><rect x="576.8" y="133" width="29.6" height="31.0" fill="rgb(229,75,15)" rx="2" ry="2" />
+<text  x="579.81" y="151.5" >se..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (46,061 microseconds, 0.58%)</title><rect x="287.4" y="37" width="9.1" height="31.0" fill="rgb(242,166,26)" rx="2" ry="2" />
+<text  x="290.39" y="55.5" ></text>
+</g>
+<g >
+<title>get_sort_key@/lib/zfsbootmenu-lib.sh (33,963 microseconds, 0.43%)</title><rect x="215.0" y="165" width="6.8" height="31.0" fill="rgb(237,21,14)" rx="2" ry="2" />
+<text  x="218.03" y="183.5" ></text>
+</g>
+<g >
+<title>load_key@/lib/zfsbootmenu-core.sh (165,895 microseconds, 2.08%)</title><rect x="235.0" y="165" width="32.8" height="31.0" fill="rgb(247,112,24)" rx="2" ry="2" />
+<text  x="238.01" y="183.5" >lo..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,353 microseconds, 0.22%)</title><rect x="769.6" y="165" width="3.5" height="31.0" fill="rgb(243,190,50)" rx="2" ry="2" />
+<text  x="772.65" y="183.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (6,291 microseconds, 0.08%)</title><rect x="58.0" y="165" width="1.2" height="31.0" fill="rgb(253,35,15)" rx="2" ry="2" />
+<text  x="60.97" y="183.5" ></text>
+</g>
+<g >
+<title>validate_cmdline_cache@/lib/zfsbootmenu-core.sh (4,431 microseconds, 0.06%)</title><rect x="786.6" y="165" width="0.8" height="31.0" fill="rgb(215,110,13)" rx="2" ry="2" />
+<text  x="789.56" y="183.5" ></text>
+</g>
+<g >
+<title>zinfo@/lib/kmsg-log-lib.sh (2,509 microseconds, 0.03%)</title><rect x="29.6" y="165" width="0.5" height="31.0" fill="rgb(209,198,19)" rx="2" ry="2" />
+<text  x="32.63" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (22,862 microseconds, 0.29%)</title><rect x="704.0" y="165" width="4.6" height="31.0" fill="rgb(215,0,17)" rx="2" ry="2" />
+<text  x="707.04" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (31,063 microseconds, 0.39%)</title><rect x="1143.2" y="165" width="6.2" height="31.0" fill="rgb(229,34,23)" rx="2" ry="2" />
+<text  x="1146.23" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-parse-commandline.sh (288,626 microseconds, 3.62%)</title><rect x="10.0" y="197" width="57.1" height="31.0" fill="rgb(208,150,34)" rx="2" ry="2" />
+<text  x="13.00" y="215.5" >source..</text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (6,280 microseconds, 0.08%)</title><rect x="48.8" y="165" width="1.2" height="31.0" fill="rgb(231,104,39)" rx="2" ry="2" />
+<text  x="51.79" y="183.5" ></text>
+</g>
+<g >
+<title>validate_cmdline_cache@/lib/zfsbootmenu-core.sh (5,346 microseconds, 0.07%)</title><rect x="1209.2" y="165" width="1.1" height="31.0" fill="rgb(246,41,41)" rx="2" ry="2" />
+<text  x="1212.21" y="183.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (35,997 microseconds, 0.45%)</title><rect x="1387.4" y="165" width="7.1" height="31.0" fill="rgb(207,130,33)" rx="2" ry="2" />
+<text  x="1390.38" y="183.5" ></text>
+</g>
+<g >
+<title>mount_zfs@/lib/zfsbootmenu-core.sh (361,969 microseconds, 4.53%)</title><rect x="484.2" y="133" width="71.7" height="31.0" fill="rgb(209,100,27)" rx="2" ry="2" />
+<text  x="487.22" y="151.5" >mount_zf..</text>
+</g>
+<g >
+<title>draw_snapshots@/lib/zfsbootmenu-lib.sh (805,537 microseconds, 10.09%)</title><rect x="1217.9" y="197" width="159.4" height="31.0" fill="rgb(226,101,31)" rx="2" ry="2" />
+<text  x="1220.89" y="215.5" >draw_snapshots@/lib/..</text>
+</g>
+<g >
+<title>read_kcl_prop@/lib/zfsbootmenu-kcl.sh (2,662 microseconds, 0.03%)</title><rect x="788.1" y="165" width="0.5" height="31.0" fill="rgb(219,148,34)" rx="2" ry="2" />
+<text  x="791.10" y="183.5" ></text>
+</g>
+<g >
+<title>read_kcl_prop@/lib/zfsbootmenu-kcl.sh (1,148 microseconds, 0.01%)</title><rect x="788.7" y="165" width="0.2" height="31.0" fill="rgb(218,52,31)" rx="2" ry="2" />
+<text  x="791.71" y="183.5" ></text>
+</g>
+<g >
+<title>load_be_cmdline@/lib/zfsbootmenu-core.sh (286,193 microseconds, 3.58%)</title><rect x="774.1" y="197" width="56.7" height="31.0" fill="rgb(215,83,5)" rx="2" ry="2" />
+<text  x="777.13" y="215.5" >load_..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,975 microseconds, 0.23%)</title><rect x="97.0" y="165" width="3.5" height="31.0" fill="rgb(219,208,30)" rx="2" ry="2" />
+<text  x="99.99" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,122 microseconds, 0.21%)</title><rect x="668.1" y="165" width="3.4" height="31.0" fill="rgb(223,1,13)" rx="2" ry="2" />
+<text  x="671.14" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,802 microseconds, 0.22%)</title><rect x="77.5" y="165" width="3.5" height="31.0" fill="rgb(238,114,25)" rx="2" ry="2" />
+<text  x="80.48" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,570 microseconds, 0.22%)</title><rect x="774.8" y="165" width="3.5" height="31.0" fill="rgb(234,96,9)" rx="2" ry="2" />
+<text  x="777.83" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-core.sh (3,621 microseconds, 0.05%)</title><rect x="737.3" y="197" width="0.7" height="31.0" fill="rgb(237,216,16)" rx="2" ry="2" />
+<text  x="740.28" y="215.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (47,475 microseconds, 0.59%)</title><rect x="309.0" y="101" width="9.4" height="31.0" fill="rgb(250,63,14)" rx="2" ry="2" />
+<text  x="312.04" y="119.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (22,223 microseconds, 0.28%)</title><rect x="1159.3" y="165" width="4.4" height="31.0" fill="rgb(237,197,32)" rx="2" ry="2" />
+<text  x="1162.31" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (21,302 microseconds, 0.27%)</title><rect x="865.9" y="165" width="4.2" height="31.0" fill="rgb(254,158,15)" rx="2" ry="2" />
+<text  x="868.89" y="183.5" ></text>
+</g>
+<g >
+<title>kcl_assemble@/lib/zfsbootmenu-kcl.sh (1,596 microseconds, 0.02%)</title><rect x="1214.1" y="165" width="0.3" height="31.0" fill="rgb(211,59,46)" rx="2" ry="2" />
+<text  x="1217.09" y="183.5" ></text>
+</g>
+<g >
+<title>zinfo@/lib/kmsg-log-lib.sh (2,620 microseconds, 0.03%)</title><rect x="41.0" y="165" width="0.5" height="31.0" fill="rgb(213,10,30)" rx="2" ry="2" />
+<text  x="44.00" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-kcl.sh (1,655 microseconds, 0.02%)</title><rect x="12.7" y="165" width="0.3" height="31.0" fill="rgb(213,37,34)" rx="2" ry="2" />
+<text  x="15.72" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (19,575 microseconds, 0.25%)</title><rect x="1576.6" y="197" width="3.9" height="31.0" fill="rgb(233,74,5)" rx="2" ry="2" />
+<text  x="1579.64" y="215.5" ></text>
+</g>
+<g >
+<title>column_wrap@/lib/zfsbootmenu-lib.sh (17,784 microseconds, 0.22%)</title><rect x="1584.2" y="165" width="3.5" height="31.0" fill="rgb(231,101,37)" rx="2" ry="2" />
+<text  x="1587.22" y="183.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (31,022 microseconds, 0.39%)</title><rect x="1453.2" y="165" width="6.2" height="31.0" fill="rgb(236,84,31)" rx="2" ry="2" />
+<text  x="1456.22" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,481 microseconds, 0.22%)</title><rect x="755.8" y="165" width="3.5" height="31.0" fill="rgb(250,226,15)" rx="2" ry="2" />
+<text  x="758.79" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,281 microseconds, 0.22%)</title><rect x="765.1" y="165" width="3.4" height="31.0" fill="rgb(237,220,40)" rx="2" ry="2" />
+<text  x="768.10" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,815 microseconds, 0.30%)</title><rect x="571.0" y="133" width="4.7" height="31.0" fill="rgb(248,143,8)" rx="2" ry="2" />
+<text  x="573.97" y="151.5" ></text>
+</g>
+<g >
+<title>is_writable@/lib/zfsbootmenu-core.sh (45,684 microseconds, 0.57%)</title><rect x="876.7" y="197" width="9.0" height="31.0" fill="rgb(206,192,4)" rx="2" ry="2" />
+<text  x="879.69" y="215.5" ></text>
+</g>
+<g >
+<title>select_kernel@/lib/zfsbootmenu-core.sh (95,748 microseconds, 1.20%)</title><rect x="1158.4" y="197" width="18.9" height="31.0" fill="rgb(251,125,26)" rx="2" ry="2" />
+<text  x="1161.36" y="215.5" ></text>
+</g>
+<g >
+<title>source@/lib/kmsg-log-lib.sh (7,571 microseconds, 0.09%)</title><rect x="839.3" y="197" width="1.5" height="31.0" fill="rgb(214,224,44)" rx="2" ry="2" />
+<text  x="842.33" y="215.5" ></text>
+</g>
+<g >
+<title>be_has_encroot@/lib/zfsbootmenu-core.sh (45,507 microseconds, 0.57%)</title><rect x="1177.9" y="197" width="9.0" height="31.0" fill="rgb(254,88,27)" rx="2" ry="2" />
+<text  x="1180.90" y="215.5" ></text>
+</g>
+<g >
+<title>kcl_assemble@/lib/zfsbootmenu-kcl.sh (1,650 microseconds, 0.02%)</title><rect x="825.4" y="165" width="0.3" height="31.0" fill="rgb(218,195,38)" rx="2" ry="2" />
+<text  x="828.37" y="183.5" ></text>
+</g>
+<g >
+<title>mount_efivarfs@/lib/zfsbootmenu-core.sh (25,528 microseconds, 0.32%)</title><rect x="76.1" y="197" width="5.1" height="31.0" fill="rgb(206,125,48)" rx="2" ry="2" />
+<text  x="79.13" y="215.5" ></text>
+</g>
+<g >
+<title>source@/lib/kmsg-log-lib.sh (4,007 microseconds, 0.05%)</title><rect x="200.6" y="197" width="0.8" height="31.0" fill="rgb(246,51,26)" rx="2" ry="2" />
+<text  x="203.58" y="215.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-kcl.sh (1,533 microseconds, 0.02%)</title><rect x="198.4" y="165" width="0.3" height="31.0" fill="rgb(211,208,31)" rx="2" ry="2" />
+<text  x="201.44" y="183.5" ></text>
+</g>
+<g >
+<title>be_is_locked@/lib/zfsbootmenu-core.sh (164,984 microseconds, 2.07%)</title><rect x="485.2" y="101" width="32.6" height="31.0" fill="rgb(228,61,12)" rx="2" ry="2" />
+<text  x="488.20" y="119.5" >be..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (29,009 microseconds, 0.36%)</title><rect x="799.9" y="133" width="5.7" height="31.0" fill="rgb(221,182,40)" rx="2" ry="2" />
+<text  x="802.90" y="151.5" ></text>
+</g>
+<g >
+<title>source@/etc/profile (1,855 microseconds, 0.02%)</title><rect x="75.3" y="197" width="0.4" height="31.0" fill="rgb(253,164,12)" rx="2" ry="2" />
+<text  x="78.31" y="215.5" ></text>
+</g>
+<g >
+<title>source@/etc/profile (1,850 microseconds, 0.02%)</title><rect x="201.6" y="197" width="0.4" height="31.0" fill="rgb(234,78,30)" rx="2" ry="2" />
+<text  x="204.62" y="215.5" ></text>
+</g>
+<g >
+<title>get_zbm_arg@/lib/zfsbootmenu-kcl.sh (8,642 microseconds, 0.11%)</title><rect x="50.6" y="165" width="1.7" height="31.0" fill="rgb(229,218,38)" rx="2" ry="2" />
+<text  x="53.58" y="183.5" ></text>
+</g>
+<g >
+<title>be_has_encroot@/lib/zfsbootmenu-core.sh (103,778 microseconds, 1.30%)</title><rect x="456.8" y="101" width="20.6" height="31.0" fill="rgb(229,103,14)" rx="2" ry="2" />
+<text  x="459.82" y="119.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (37,951 microseconds, 0.48%)</title><rect x="637.1" y="165" width="7.5" height="31.0" fill="rgb(232,8,1)" rx="2" ry="2" />
+<text  x="640.05" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/kmsg-log-lib.sh (5,458 microseconds, 0.07%)</title><rect x="628.7" y="197" width="1.0" height="31.0" fill="rgb(205,139,12)" rx="2" ry="2" />
+<text  x="631.66" y="215.5" ></text>
+</g>
+<g >
+<title>global_header@/lib/zfsbootmenu-lib.sh (6,489 microseconds, 0.08%)</title><rect x="623.6" y="165" width="1.3" height="31.0" fill="rgb(215,96,21)" rx="2" ry="2" />
+<text  x="626.62" y="183.5" ></text>
+</g>
+<g >
+<title>global_header@/lib/zfsbootmenu-lib.sh (6,716 microseconds, 0.08%)</title><rect x="1588.7" y="165" width="1.3" height="31.0" fill="rgb(230,222,27)" rx="2" ry="2" />
+<text  x="1591.67" y="183.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (30,173 microseconds, 0.38%)</title><rect x="1164.2" y="165" width="5.9" height="31.0" fill="rgb(237,92,42)" rx="2" ry="2" />
+<text  x="1167.16" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (16,609 microseconds, 0.21%)</title><rect x="211.4" y="165" width="3.3" height="31.0" fill="rgb(211,20,18)" rx="2" ry="2" />
+<text  x="214.40" y="183.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-kcl.sh (1,269 microseconds, 0.02%)</title><rect x="72.3" y="197" width="0.3" height="31.0" fill="rgb(233,93,41)" rx="2" ry="2" />
+<text  x="75.32" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (38,248 microseconds, 0.48%)</title><rect x="598.6" y="101" width="7.6" height="31.0" fill="rgb(223,180,44)" rx="2" ry="2" />
+<text  x="601.59" y="119.5" ></text>
+</g>
+<g >
+<title>kcl_append@/lib/zfsbootmenu-kcl.sh (3,229 microseconds, 0.04%)</title><rect x="714.7" y="165" width="0.7" height="31.0" fill="rgb(251,134,46)" rx="2" ry="2" />
+<text  x="717.72" y="183.5" ></text>
+</g>
+<g >
+<title>find_be_kernels@/lib/zfsbootmenu-core.sh (846,699 microseconds, 10.61%)</title><rect x="268.0" y="165" width="167.6" height="31.0" fill="rgb(246,121,5)" rx="2" ry="2" />
+<text  x="271.01" y="183.5" >find_be_kernels@/lib/..</text>
+</g>
+<g >
+<title>main@/libexec/zfsbootmenu-preview (320,642 microseconds, 4.02%)</title><rect x="1404.5" y="229" width="63.5" height="31.0" fill="rgb(217,184,24)" rx="2" ry="2" />
+<text  x="1407.55" y="247.5" >main@/..</text>
+</g>
+<g >
+<title>kcl_tokenize@/lib/zfsbootmenu-kcl.sh (27,326 microseconds, 0.34%)</title><rect x="689.7" y="165" width="5.4" height="31.0" fill="rgb(206,198,29)" rx="2" ry="2" />
+<text  x="692.66" y="183.5" ></text>
+</g>
+<g >
+<title>be_has_encroot@/lib/zfsbootmenu-core.sh (89,292 microseconds, 1.12%)</title><rect x="249.4" y="101" width="17.7" height="31.0" fill="rgb(239,125,40)" rx="2" ry="2" />
+<text  x="252.39" y="119.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (16,903 microseconds, 0.21%)</title><rect x="1197.4" y="165" width="3.4" height="31.0" fill="rgb(232,23,19)" rx="2" ry="2" />
+<text  x="1200.43" y="183.5" ></text>
+</g>
+<g >
+<title>kcl_suppress@/lib/zfsbootmenu-kcl.sh (45,661 microseconds, 0.57%)</title><rect x="715.7" y="165" width="9.0" height="31.0" fill="rgb(219,127,38)" rx="2" ry="2" />
+<text  x="718.69" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (17,056 microseconds, 0.21%)</title><rect x="1439.9" y="165" width="3.4" height="31.0" fill="rgb(241,10,2)" rx="2" ry="2" />
+<text  x="1442.88" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (52,464 microseconds, 0.66%)</title><rect x="495.7" y="37" width="10.4" height="31.0" fill="rgb(253,32,6)" rx="2" ry="2" />
+<text  x="498.71" y="55.5" ></text>
+</g>
+<g >
+<title>kcl_append@/lib/zfsbootmenu-kcl.sh (1,526 microseconds, 0.02%)</title><rect x="715.4" y="165" width="0.3" height="31.0" fill="rgb(233,129,1)" rx="2" ry="2" />
+<text  x="718.38" y="183.5" ></text>
+</g>
+<g >
+<title>be_location@/lib/zfsbootmenu-core.sh (30,812 microseconds, 0.39%)</title><rect x="1417.9" y="165" width="6.1" height="31.0" fill="rgb(222,108,20)" rx="2" ry="2" />
+<text  x="1420.88" y="183.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (22,287 microseconds, 0.28%)</title><rect x="1172.7" y="165" width="4.4" height="31.0" fill="rgb(229,6,28)" rx="2" ry="2" />
+<text  x="1175.69" y="183.5" ></text>
+</g>
+<g >
+<title>be_has_encroot@/lib/zfsbootmenu-core.sh (57,286 microseconds, 0.72%)</title><rect x="865.0" y="197" width="11.4" height="31.0" fill="rgb(241,229,35)" rx="2" ry="2" />
+<text  x="868.01" y="215.5" ></text>
+</g>
+<g >
+<title>find_be_kernels@/lib/zfsbootmenu-core.sh (677,946 microseconds, 8.49%)</title><rect x="478.2" y="165" width="134.2" height="31.0" fill="rgb(205,122,25)" rx="2" ry="2" />
+<text  x="481.20" y="183.5" >find_be_kernels@..</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (23,808 microseconds, 0.30%)</title><rect x="607.3" y="133" width="4.7" height="31.0" fill="rgb(224,181,29)" rx="2" ry="2" />
+<text  x="610.28" y="151.5" ></text>
+</g>
+<g >
+<title>make_cmdline_dir@/lib/zfsbootmenu-kcl.sh (58,830 microseconds, 0.74%)</title><rect x="15.1" y="133" width="11.7" height="31.0" fill="rgb(233,221,16)" rx="2" ry="2" />
+<text  x="18.15" y="151.5" ></text>
+</g>
+<g >
+<title>source@/lib/zfsbootmenu-core.sh (4,651 microseconds, 0.06%)</title><rect x="629.9" y="197" width="1.0" height="31.0" fill="rgb(235,225,48)" rx="2" ry="2" />
+<text  x="632.94" y="215.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (37,007 microseconds, 0.46%)</title><rect x="259.3" y="69" width="7.3" height="31.0" fill="rgb(223,17,26)" rx="2" ry="2" />
+<text  x="262.27" y="87.5" ></text>
+</g>
+<g >
+<title>colorize@/lib/zfsbootmenu-core.sh (9,696 microseconds, 0.12%)</title><rect x="832.3" y="197" width="1.9" height="31.0" fill="rgb(229,183,25)" rx="2" ry="2" />
+<text  x="835.29" y="215.5" ></text>
+</g>
+<g >
+<title>main@/libexec/zfsbootmenu-preview (1,416,763 microseconds, 17.75%)</title><rect x="624.9" y="229" width="280.4" height="31.0" fill="rgb(216,137,38)" rx="2" ry="2" />
+<text  x="627.91" y="247.5" >main@/libexec/zfsbootmenu-preview</text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (24,601 microseconds, 0.31%)</title><rect x="698.6" y="133" width="4.8" height="31.0" fill="rgb(211,94,44)" rx="2" ry="2" />
+<text  x="701.55" y="151.5" ></text>
+</g>
+<g >
+<title>zdebug@/lib/kmsg-log-lib.sh (29,002 microseconds, 0.36%)</title><rect x="1202.2" y="133" width="5.8" height="31.0" fill="rgb(250,170,47)" rx="2" ry="2" />
+<text  x="1205.24" y="151.5" ></text>
+</g>
+<g >
+<title>main@/bin/zfsbootmenu (2,172,205 microseconds, 27.21%)</title><rect x="195.0" y="229" width="429.9" height="31.0" fill="rgb(218,100,49)" rx="2" ry="2" />
+<text  x="198.02" y="247.5" >main@/bin/zfsbootmenu</text>
+</g>
+</g>
+</svg>
