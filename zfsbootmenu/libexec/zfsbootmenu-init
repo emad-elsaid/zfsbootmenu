@@ -59,7 +59,10 @@ if ! _modload="$( modprobe zfs 2>&1 )" ; then
   emergency_shell "unable to load ZFS kernel modules"
 fi
 
-udevadm settle
+if get_zbm_bool 0 zbm.udevadm ; then
+  zdebug "triggering udevadm"
+  zdebug "$( udevadm --debug settle )"
+fi
 
 # Write out a default or overridden hostid
 if [ -n "${spl_hostid}" ] ; then
