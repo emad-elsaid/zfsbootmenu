@@ -41,11 +41,16 @@ OPTIONS:
   -d Force use of docker instead of podman
 
   -M <argument>
-     Provide a comma-separated list of mount options to use with
-     podman/docker volume mounts. Eg. to relabel the directories
-     on systems with SELinux enabled:
+     Provide a comma-separated list of options to use for volume
+     mounts of the build directory and (if specified) ZFSBootMenu
+     source tree within the build container. For example, specify
 
        zbm-builder -M z
+
+     to label the volumes for use with SELinux.
+
+     NOTE: An 'ro' option is always added to the volume mounted from
+     the ZFSBootMenu source tree.
 
   -O <argument>
      Provide an option to 'podman run' or 'docker run'; if the

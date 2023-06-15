@@ -108,11 +108,6 @@ Building a ZFSBootMenu Image
 To build a default image, invoke ``zbm-builder.sh`` with no arguments. For example, from the directory that contains the
 script, run ``./zbm-builder.sh`` to produce a default kernel/initramfs pair in the ``./build`` subdirectory.
 
-To build on a host with SELinux enabled, the ``-M z -O -e=DRACUT_NO_XATTR=1`` options are needed. The `z` mount flag will
-relabel both the build (``-b``) and source (``-l``) directories with the ``container_file_t`` type so that the container
-is able to access the files. The ``DRACUT_NO_XATTR`` will prevent dracut from trying to set xattrs on temporary files
-within the container. Specifically, a container is never allowed to set the ``security.selinux`` xattr.
-
 The default behavior of ``zbm-builder.sh`` will:
 
 1. Pull the default builder image, ``ghcr.io/zbm-dev/zbm-builder:latest``.
@@ -122,6 +117,18 @@ The default behavior of ``zbm-builder.sh`` will:
   1. Bind-mount the working directory into the container to expose local configurations to the builder
   2. If ``./config.yaml`` exists, inform the builder to use that custom configuration instead of the default
   3. Run the internal build script to produce output in the ``./build`` subdirectory
+
+.. note::
+
+  Building on hosts with SELinux enabled may require that volumes mounted by the build container be properly labeled.
+  This can be accomplished by specifying the argument ``-M z`` to ``zbm-builder.sh``. This will persistently relabel the
+  build directory and, if specified, the ZFSBootMenu source directory. As an alternative to conf, it may be possible to
+  disable SELinux entirely by invoking ``zbm-builder.sh`` with the argument ``-O --security-opt=label=disable``.
+
+  When Dracut is used to build an image under the constraints of SELinux, ``zbm-builder.sh`` should additionally be
+  invoked with the argument ``-O --env=DRACUT_NO_XATTR=1`` to prevent Dracut from setting extended attributes on
+  temporary files it creates within the container. Without this option, Dracut may try, but fail, to set the
+  ``security.selinux`` attribute on files.
 
 Custom ZFSBootMenu Hooks
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -179,3 +186,6 @@ command-line options that are described in the output of ``zbm-builder.sh -h``.
 
 Before adjusting these command-line options, seek a thorough understanding of the
 :zbm:`image build process <releng/docker/README.md>` and the command sequence of ``zbm-builder.sh`` itself.
+
+..
+  vim: softtabstop=2 shiftwidth=2 textwidth=120
